@@ -1,0 +1,195 @@
+version: "2"
+
+services:
+
+   # reverse proxy
+   nginx-proxy:
+      image: jwilder/nginx-proxy
+      container_name: nginx-proxy
+      ports:
+         - "80:80"
+         - "443:443"
+      volumes:
+         - /var/run/docker.sock:/tmp/docker.sock:ro
+         - ./ssl:/etc/nginx/certs
+      restart: ${RESTART}
+      networks:
+         - frontend
+
+   # redirect ${BASE_DOMAIN} -> ${WP_DOMAIN}
+   redirect:
+      image: schmunk42/nginx-redirect
+      ports:
+         - "8888:80"
+      environment:
+         - SERVER_REDIRECT=${WP_DOMAIN}
+         - SERVER_REDIRECT_SCHEME=https
+         - SERVER_REDIRECT_CODE=302
+         - VIRTUAL_HOST=${BASE_DOMAIN}
+      networks:
+         - frontend
+
+   # wordpress
+   wordpress-db:
+      image: mariadb:latest
+      command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
+      volumes:
+         - wordpress-db-data:/var/lib/mysql
+      restart: ${RESTART}
+      environment:
+         - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASS}
+         - MYSQL_DATABASE=wordpress
+         - MYSQL_USER=wordpress
+         - MYSQL_PASSWORD=${MYSQL_PASS}
+      networks:
+         - wordpress-tier
+   wordpress:
+      depends_on:
+         - wordpress-db
+      image: wordpress:latest
+      ports:
+         - "8080:80"
+      restart: ${RESTART}
+      networks:
+         - wordpress-tier
+         - frontend
+      environment:
+         - WORDPRESS_DB_HOST=wordpress-db:3306
+         - WORDPRESS_DB_USER=wordpress
+         - WORDPRESS_DB_PASSWORD=${MYSQL_PASS}
+         - WORDPRESS_DB_NAME=wordpress
+         - VIRTUAL_HOST=${WP_DOMAIN}
+      volumes:
+         - wordpress-data:/var/www/html
+  
+   # zammad helpdesk
+   zammad-backup:
+      command: ["zammad-backup"]
+      depends_on:
+         - zammad-railsserver
+      entrypoint: /usr/local/bin/backup.sh
+      environment:
+         - BACKUP_SLEEP=86400
+         - HOLD_DAYS=10
+         - POSTGRESQL_USER=zammad
+         - POSTGRESQL_PASSWORD=${POSTGRES_PASS}
+      image: ${IMAGE_REPO}:zammad-postgresql${VERSION}
+      restart: ${RESTART}
+      volumes:
+         - zammad-backup:/var/tmp/zammad
+         - zammad-data:/opt/zammad
+      networks:
+         - zammad-tier
+
+   zammad-elasticsearch:
+      environment:
+         - discovery.type=single-node
+      image: ${IMAGE_REPO}:zammad-elasticsearch${VERSION}
+      restart: ${RESTART}
+      volumes:
+         - elasticsearch-data:/usr/share/elasticsearch/data
+      networks:
+         - zammad-tier
+
+   zammad-init:
+      command: ["zammad-init"]
+      depends_on:
+         - zammad-postgresql
+      environment:
+         - POSTGRESQL_USER=zammad
+         - POSTGRESQL_PASS=${POSTGRES_PASS}
+      image: ${IMAGE_REPO}:zammad${VERSION}
+      restart: on-failure
+      volumes:
+         - zammad-data:/opt/zammad
+      networks:
+         - zammad-tier
+
+   zammad-memcached:
+      command: memcached -m 256M
+      image: memcached:1.6.9-alpine
+      restart: ${RESTART}
+      networks:
+         - zammad-tier
+
+   zammad-nginx:
+      command: ["zammad-nginx"]
+      environment:
+         - VIRTUAL_HOST=${HELPDESK_DOMAIN}
+         - NGINX_SERVER_SCHEME=https
+      expose:
+         - "80"
+      depends_on:
+         - zammad-railsserver
+      image: ${IMAGE_REPO}:zammad${VERSION}
+      restart: ${RESTART}
+      volumes:
+         - zammad-data:/opt/zammad
+      networks:
+         - zammad-tier
+         - frontend
+
+   zammad-postgresql:
+      environment:
+         - POSTGRES_USER=zammad
+         - POSTGRES_PASSWORD=${POSTGRES_PASS}
+      image: ${IMAGE_REPO}:zammad-postgresql${VERSION}
+      restart: ${RESTART}
+      volumes:
+         - postgresql-data:/var/lib/postgresql/data
+      networks:
+         - zammad-tier
+
+   zammad-railsserver:
+      command: ["zammad-railsserver"]
+      depends_on:
+         - zammad-memcached
+         - zammad-postgresql
+      image: ${IMAGE_REPO}:zammad${VERSION}
+      restart: ${RESTART}
+      volumes:
+         - zammad-data:/opt/zammad
+      networks:
+         - zammad-tier
+
+   zammad-scheduler:
+      command: ["zammad-scheduler"]
+      depends_on:
+         - zammad-memcached
+         - zammad-railsserver
+      image: ${IMAGE_REPO}:zammad${VERSION}
+      restart: ${RESTART}
+      volumes:
+         - zammad-data:/opt/zammad
+      networks:
+         - zammad-tier
+
+   zammad-websocket:
+      command: ["zammad-websocket"]
+      depends_on:
+         - zammad-memcached
+         - zammad-railsserver
+      image: ${IMAGE_REPO}:zammad${VERSION}
+      restart: ${RESTART}
+      volumes:
+         - zammad-data:/opt/zammad
+      networks:
+         - zammad-tier
+
+volumes:
+   wordpress-db-data:
+      driver: local
+   wordpress-data:
+      driver: local
+   elasticsearch-data:
+      driver: local
+   postgresql-data:
+      driver: local
+   zammad-backup:
+      driver: local
+   zammad-data:
+      driver: local
+networks:
+   wordpress-tier:
+   zammad-tier:
+   frontend:
